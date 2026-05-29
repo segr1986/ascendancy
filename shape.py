@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import os
 import sys
 import png
@@ -28,121 +28,167 @@ def get_arguments():
 
 
 def extract_shapes(filename, pal0):
+    try:
         handle = open(filename, 'rb')
         magic = struct.unpack('<I', handle.read(4))[0]
+        
         if magic != 0x30312E31:
-            raise Exception("Invalid SHP file (bad signature).")
+            print("  [Skipped] {} (Invalid Ascendancy signature).".format(os.path.basename(filename)))
+            handle.close()
+            return
+            
         image_count = struct.unpack('<I', handle.read(4))[0]
-        dir, file_ = os.path.split(os.path.abspath(filename))
-        dir = os.path.join(dir, file_.replace('.shp', ''))
-        if not os.path.isdir(dir):
-            os.makedirs(dir)
-        for i in range(image_count):
-            off_dat = struct.unpack('<I', handle.read(4))[0]
-            off_pal = struct.unpack('<I', handle.read(4))[0]
-            off_restore = handle.tell()
+    except Exception as e:
+        print("  [Error] Could not open {}: {}".format(os.path.basename(filename), e))
+        return
 
-            palette = pal0
-            if off_pal != 0:
-                handle.seek(off_pal)
-                palette = read_palette(handle)
-            elif pal0 is None:
-                print("Default palette required for {}/{}; skipping...".format(i+1, image_count))
-                continue
+    dir, file_ = os.path.split(os.path.abspath(filename))
+    folder_name = file_.replace('.shp', '').replace('.SHP', '')
+    dir = os.path.join(dir, folder_name)
+    
+    os.makedirs(dir, exist_ok=True)
+    
+    offsets = []
+    for i in range(image_count):
+        off_dat = struct.unpack('<I', handle.read(4))[0]
+        off_pal = struct.unpack('<I', handle.read(4))[0]
+        offsets.append((off_dat, off_pal))
+    
+    print("Processing {} (Images: {})...".format(file_, image_count))
+    
+    for i in range(image_count):
+        off_dat, off_pal = offsets[i]
 
-            handle.seek(off_dat)
-            shp_to_png(dir, palette, handle, i+1, image_count)
-            handle.seek(off_restore)
+        palette = pal0
+        if off_pal != 0:
+            handle.seek(off_pal)
+            palette = read_palette(handle)
+        elif pal0 is None:
+            palette = [[g, g, g, 0xFF] for g in range(256)]
+
+        handle.seek(off_dat)
+        shp_to_png(dir, palette, handle, i+1, image_count)
+        
+    handle.close()
 
 
 def read_palette(handle, size=256):
     entries = []
+    eof_reached = False
+    
     for index in range(size):
-        rgb = handle.read(3)
-        entries.append([rgb[0] << 2, rgb[1] << 2, rgb[2] << 2, 0xFF])
+        if not eof_reached:
+            rgb = handle.read(3)
+            if len(rgb) < 3:
+                # File ended early, trigger warning and fill remaining slots
+                print("  [Warning] Palette file ended prematurely at index {}.".format(index), file=sys.stderr)
+                eof_reached = True
+        
+        if eof_reached:
+            # Safe fallback: fill missing colors with solid black (or transparent [0,0,0,0])
+            entries.append([0, 0, 0, 0xFF])
+        else:
+            entries.append([rgb[0] << 2, rgb[1] << 2, rgb[2] << 2, 0xFF])
+            
     return entries
 
 
 def shp_to_png(dir, palette, handle, entry, total):
-    __, parent = os.path.split(dir)
     idxlen = len("{}".format(total))
     pngstr = "{}".format(entry).rjust(idxlen, '0')
     pngstr = "".join([pngstr, '.png'])
     filename = os.path.join(dir, pngstr)
-    testname = os.path.join(parent, pngstr)
 
-    height = 1 + struct.unpack('<H', handle.read(2))[0]
-    width = 1 + struct.unpack('<H', handle.read(2))[0]
-
-    x_center = struct.unpack('<H', handle.read(2))[0]
-    y_center = struct.unpack('<H', handle.read(2))[0]
-    x_start  = struct.unpack('<i', handle.read(4))[0]
-    y_start  = struct.unpack('<i', handle.read(4))[0]
-    x_end    = struct.unpack('<i', handle.read(4))[0]
-    y_end    = struct.unpack('<i', handle.read(4))[0]
-    if (x_start > (width-1)) or (y_start > (width-1)):
-        print("Unable to create {} (w:{}, h:{}, x:{}, y:{}).".format(testname, width, height, x_start, y_start))
+    try:
+        height = 1 + struct.unpack('<H', handle.read(2))[0]
+        width = 1 + struct.unpack('<H', handle.read(2))[0]
+        
+        x_center = struct.unpack('<H', handle.read(2))[0]
+        y_center = struct.unpack('<H', handle.read(2))[0]
+        x_start  = struct.unpack('<i', handle.read(4))[0]
+        y_start  = struct.unpack('<i', handle.read(4))[0]
+        x_end    = struct.unpack('<i', handle.read(4))[0]
+        y_end    = struct.unpack('<i', handle.read(4))[0]
+    except:
+        print("Unable to read header for image {}.".format(entry))
         return
 
-    top = y_center + y_start
-    bottom = y_center + y_end
-    left = x_center + x_start
-
-    background = [0, 0, 0, 0xFF]
-    pad_row = background * width
-    pad_left = background * left
-
+    transparent_pixel = [0, 0, 0, 0]
+    pixel_grid = [[transparent_pixel for _ in range(width)] for _ in range(height)]
+    
+    x = 0
     y = 0
-    row = []
-    pixels = []
 
-    # this doesn't seem right... but works
-    plane_width = width << 2
-    read_width = (x_center + x_end + (x_center + x_start)) << 2
-    if plane_width > read_width: read_width = plane_width
+    total_data_rows = y_end - y_start
+    rows_processed = 0
 
-    while y < height:
-        if (y < top) or (y >= bottom):
-            pixels.append(pad_row)
-            y += 1
-            continue
+    pixels_written_in_row = False
 
-        if len(row) == 0:
-            row += pad_left
+    while y < height and rows_processed <= total_data_rows:
+        byte_data = handle.read(1)
+        if not byte_data:
+            break
 
-        try:
-            b = handle.read(1)[0]
-        except Exception as e:
-            print("Unable to create {} (hit EOF at {},{} of {},{}).".format(testname, len(row) >> 2, y, width, height))
-            return
+        b = byte_data[0]
 
         if b == 0:
-            # this doesn't seem right either...
-            if len(row) == len(pad_left):
-                continue
-            row += background * ((read_width - len(row)) >> 2)
+            if pixels_written_in_row:
+                y += 1
+                rows_processed += 1
+            x = 0
+            pixels_written_in_row = False
+            continue
+            
         elif b == 1:
-            px = handle.read(1)[0]
-            row += background * px
+            skip_data = handle.read(1)
+            if not skip_data:
+                break
+            x += skip_data[0]
+            
         elif (b & 1) == 0:
-            clr = palette[handle.read(1)[0]]
-            for i in range(b >> 1):
-                row += clr
+            count = b >> 1
+            pal_data = handle.read(1)
+            if not pal_data:
+                break
+            pal_idx = pal_data[0]
+            clr = palette[pal_idx] if pal_idx < len(palette) else transparent_pixel
+            
+            for _ in range(count):
+                if 0 <= y < height and 0 <= x < width:
+                    pixel_grid[y][x] = clr
+                    pixels_written_in_row = True
+                x += 1
         else:
-            for i in range(b >> 1):
-                clr = palette[handle.read(1)[0]]
-                row += clr
+            count = b >> 1
+            for _ in range(count):
+                pal_data = handle.read(1)
+                if not pal_data:
+                    break
+                pal_idx = pal_data[0]
+                clr = palette[pal_idx] if pal_idx < len(palette) else transparent_pixel
+                
+                if 0 <= y < height and 0 <= x < width:
+                    pixel_grid[y][x] = clr
+                    pixels_written_in_row = True
+                x += 1
 
-        if len(row) == read_width:
-            row = row[:plane_width]
-            pixels.append(row)
-            row = []
-            y += 1
+        if x >= width:
+            if pixels_written_in_row:
+                y += 1
+                rows_processed += 1
+            x = 0
+            pixels_written_in_row = False
 
-    fout = open(filename, 'wb')
-    w = png.Writer(width=width, height=height, bitdepth=8, alpha=True)
-    w.write(fout, pixels)
-    fout.close()
+    pixels = []
+    for r in range(height):
+        row = []
+        for c in range(width):
+            row += pixel_grid[r][c]
+        pixels.append(row)
+
+    with open(filename, 'wb') as fout:
+        w = png.Writer(width=width, height=height, bitdepth=8, greyscale=False, alpha=True)
+        w.write(fout, pixels)
 
 
 def main():
@@ -150,4 +196,5 @@ def main():
     extract_shapes(filename, palette)
 
 
-main()
+if __name__ == "__main__":
+    main()
