@@ -17,7 +17,7 @@ Utilities to extract and convert Ascendancy game resources (fully modernized for
 
 To automatically unpack the full game CD, align regional color palettes, and neatly structure all game assets, place all script files in the same directory and execute:
 
-    python3 extract_all.py /media/cdrom ~/dev/ascendancy_godot/assets
+    python3 extract_all.py /media/cdrom /tmp/ascendancy_assets
 
 ## resource guide ##
 
