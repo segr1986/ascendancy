@@ -4,197 +4,231 @@ import sys
 import png
 import struct
 
-
 def get_arguments():
     if len(sys.argv) < 2:
-        print("No SHP file specified.")
+        print("Usage: python3 shape.py <file.shp> [palette.pal]", file=sys.stderr)
         sys.exit(-1)
-    filename = sys.argv[1]
-    if not os.path.isfile(filename):
-        print("Not a valid file \"{}\".".format(filename))
-        sys.exit(-1)
-
+    
+    filename = os.path.abspath(sys.argv[1])
     palette = None
+    
     if len(sys.argv) == 3:
         palfile = sys.argv[2]
-        if not os.path.isfile(palfile):
-            print("Not a valid palette file \"{}\".".format(palfile))
-            sys.exit(-1)
-        palfile = open(palfile, 'rb')
-        palette = read_palette(palfile)
-        palfile.close()
-
-    return os.path.abspath(filename), palette
-
-
-def extract_shapes(filename, pal0):
-    try:
-        handle = open(filename, 'rb')
-        magic = struct.unpack('<I', handle.read(4))[0]
-        
-        if magic != 0x30312E31:
-            print("  [Skipped] {} (Invalid Ascendancy signature).".format(os.path.basename(filename)))
-            handle.close()
-            return
-            
-        image_count = struct.unpack('<I', handle.read(4))[0]
-    except Exception as e:
-        print("  [Error] Could not open {}: {}".format(os.path.basename(filename), e))
-        return
-
-    dir, file_ = os.path.split(os.path.abspath(filename))
-    folder_name = file_.replace('.shp', '').replace('.SHP', '')
-    dir = os.path.join(dir, folder_name)
+        with open(palfile, 'rb') as f:
+            palette = read_palette(f)
     
-    os.makedirs(dir, exist_ok=True)
-    
-    offsets = []
-    for i in range(image_count):
-        off_dat = struct.unpack('<I', handle.read(4))[0]
-        off_pal = struct.unpack('<I', handle.read(4))[0]
-        offsets.append((off_dat, off_pal))
-    
-    print("Processing {} (Images: {})...".format(file_, image_count))
-    
-    for i in range(image_count):
-        off_dat, off_pal = offsets[i]
-
-        palette = pal0
-        if off_pal != 0:
-            handle.seek(off_pal)
-            palette = read_palette(handle)
-        elif pal0 is None:
-            palette = [[g, g, g, 0xFF] for g in range(256)]
-
-        handle.seek(off_dat)
-        shp_to_png(dir, palette, handle, i+1, image_count)
-        
-    handle.close()
-
+    return filename, palette
 
 def read_palette(handle, size=256):
     entries = []
-    eof_reached = False
-    
-    for index in range(size):
-        if not eof_reached:
-            rgb = handle.read(3)
-            if len(rgb) < 3:
-                # File ended early, trigger warning and fill remaining slots
-                print("  [Warning] Palette file ended prematurely at index {}.".format(index), file=sys.stderr)
-                eof_reached = True
-        
-        if eof_reached:
-            # Safe fallback: fill missing colors with solid black (or transparent [0,0,0,0])
+    for _ in range(size):
+        rgb = handle.read(3)
+        if len(rgb) < 3:
             entries.append([0, 0, 0, 0xFF])
         else:
             entries.append([rgb[0] << 2, rgb[1] << 2, rgb[2] << 2, 0xFF])
-            
     return entries
 
-
-def shp_to_png(dir, palette, handle, entry, total):
-    idxlen = len("{}".format(total))
-    pngstr = "{}".format(entry).rjust(idxlen, '0')
-    pngstr = "".join([pngstr, '.png'])
-    filename = os.path.join(dir, pngstr)
-
-    try:
-        height = 1 + struct.unpack('<H', handle.read(2))[0]
-        width = 1 + struct.unpack('<H', handle.read(2))[0]
+def parse_shp(filename, global_palette):
+    with open(filename, 'rb') as handle:
+        magic = struct.unpack('<I', handle.read(4))[0]
+        if magic != 0x30312E31:
+            print("Error: Invalid Ascendancy signature.", file=sys.stderr)
+            sys.exit(-1)
         
-        x_center = struct.unpack('<H', handle.read(2))[0]
-        y_center = struct.unpack('<H', handle.read(2))[0]
-        x_start  = struct.unpack('<i', handle.read(4))[0]
-        y_start  = struct.unpack('<i', handle.read(4))[0]
-        x_end    = struct.unpack('<i', handle.read(4))[0]
-        y_end    = struct.unpack('<i', handle.read(4))[0]
-    except:
-        print("Unable to read header for image {}.".format(entry))
-        return
+        image_count = struct.unpack('<I', handle.read(4))[0]
+        offsets = []
+        for _ in range(image_count):
+            off_dat = struct.unpack('<I', handle.read(4))[0]
+            off_pal = struct.unpack('<I', handle.read(4))[0]
+            offsets.append((off_dat, off_pal))
+        
+        frames = []
+        file_size = os.path.getsize(filename)
+        sorted_dat_offsets = sorted([o[0] for o in offsets])
+        
+        for i, (off_dat, off_pal) in enumerate(offsets):
+            current_palette = global_palette
+            if off_pal != 0:
+                origin = handle.tell()
+                handle.seek(off_pal)
+                current_palette = read_palette(handle)
+                handle.seek(origin)
+            elif global_palette is None:
+                current_palette = [[g, g, g, 0xFF] for g in range(256)]
+            
+            handle.seek(off_dat)
+            height   = struct.unpack('<H', handle.read(2))[0] + 1
+            width    = struct.unpack('<H', handle.read(2))[0] + 1
+            x_center = struct.unpack('<H', handle.read(2))[0]
+            y_center = struct.unpack('<H', handle.read(2))[0]
+            
+            x_start  = struct.unpack('<i', handle.read(4))[0]
+            y_start  = struct.unpack('<i', handle.read(4))[0]
+            x_end    = struct.unpack('<i', handle.read(4))[0]
+            y_end    = struct.unpack('<i', handle.read(4))[0]
+            
+            next_offset = file_size
+            idx_in_sorted = sorted_dat_offsets.index(off_dat)
+            if idx_in_sorted + 1 < len(sorted_dat_offsets):
+                next_offset = sorted_dat_offsets[idx_in_sorted + 1]
+            
+            rle_len = next_offset - (off_dat + 28)
+            if rle_len < 0: 
+                rle_len = 0 
+            
+            rle_data = handle.read(rle_len)
+            
+            frames.append({
+                "num": i + 1, "width": width, "height": height,
+                "x_center": x_center, "y_center": y_center,
+                "x_start": x_start, "y_start": y_start,
+                "x_end": x_end, "y_end": y_end,
+                "palette": current_palette, "rle_data": rle_data
+            })
+    return frames, image_count
 
-    transparent_pixel = [0, 0, 0, 0]
-    pixel_grid = [[transparent_pixel for _ in range(width)] for _ in range(height)]
+def decompress_rle(frame, transparent):
+    w, h = frame["width"], frame["height"]
+    buf = [[transparent for _ in range(w)] for _ in range(h)]
+    rle = frame["rle_data"]
+    data_len = len(rle)
+    idx = 0
     
-    x = 0
-    y = 0
-
-    total_data_rows = y_end - y_start
-    rows_processed = 0
-
-    pixels_written_in_row = False
-
-    while y < height and rows_processed <= total_data_rows:
-        byte_data = handle.read(1)
-        if not byte_data:
-            break
-
-        b = byte_data[0]
-
+    x, y = 0, 0
+    just_auto_wrapped = False
+    
+    while y < h and idx < data_len:
+        b = rle[idx]
+        idx += 1
+        
         if b == 0:
-            if pixels_written_in_row:
+            if (x > 0 or y > 0) and not just_auto_wrapped:
                 y += 1
-                rows_processed += 1
-            x = 0
-            pixels_written_in_row = False
+                x = 0
+            just_auto_wrapped = False
             continue
-            
-        elif b == 1:
-            skip_data = handle.read(1)
-            if not skip_data:
-                break
-            x += skip_data[0]
-            
+        
+        if idx >= data_len: 
+            break
+        
+        just_auto_wrapped = False
+        
+        if b == 1:
+            skip = rle[idx]
+            idx += 1
+            for _ in range(skip):
+                x += 1
+                if x >= w:
+                    y += 1
+                    x = 0
+                    just_auto_wrapped = True
+        
         elif (b & 1) == 0:
             count = b >> 1
-            pal_data = handle.read(1)
-            if not pal_data:
-                break
-            pal_idx = pal_data[0]
-            clr = palette[pal_idx] if pal_idx < len(palette) else transparent_pixel
-            
+            pal_idx = rle[idx]
+            idx += 1
+            clr = frame["palette"][pal_idx] if pal_idx < 256 else transparent
             for _ in range(count):
-                if 0 <= y < height and 0 <= x < width:
-                    pixel_grid[y][x] = clr
-                    pixels_written_in_row = True
+                if y < h and x < w:
+                    buf[y][x] = clr
                 x += 1
+                if x >= w:
+                    y += 1
+                    x = 0
+                    just_auto_wrapped = True
+                else:
+                    just_auto_wrapped = False
+        
         else:
             count = b >> 1
             for _ in range(count):
-                pal_data = handle.read(1)
-                if not pal_data:
-                    break
-                pal_idx = pal_data[0]
-                clr = palette[pal_idx] if pal_idx < len(palette) else transparent_pixel
-                
-                if 0 <= y < height and 0 <= x < width:
-                    pixel_grid[y][x] = clr
-                    pixels_written_in_row = True
+                if idx >= data_len: break
+                pal_idx = rle[idx]
+                idx += 1
+                clr = frame["palette"][pal_idx] if pal_idx < 256 else transparent
+                if y < h and x < w:
+                    buf[y][x] = clr
                 x += 1
+                if x >= w:
+                    y += 1
+                    x = 0
+                    just_auto_wrapped = True
+                else:
+                    just_auto_wrapped = False
+                
+    return buf
 
-        if x >= width:
-            if pixels_written_in_row:
-                y += 1
-                rows_processed += 1
-            x = 0
-            pixels_written_in_row = False
-
-    pixels = []
-    for r in range(height):
-        row = []
-        for c in range(width):
-            row += pixel_grid[r][c]
-        pixels.append(row)
-
+def write_png(filename, width, height, grid):
+    pixels = [[pixel for rgba in row for pixel in rgba] for row in grid]
     with open(filename, 'wb') as fout:
         w = png.Writer(width=width, height=height, bitdepth=8, greyscale=False, alpha=True)
         w.write(fout, pixels)
 
+def pipeline_render(frame, raw_buf, output_dir, total_count, transparent):
+    z_num = str(frame['num']).zfill(len(str(total_count)))
+    base_path = os.path.join(output_dir, z_num)
+    
+    canvas_w = frame["width"]
+    canvas_height = frame["height"]
+    
+    write_png(f"{base_path}_raw.png", canvas_w, canvas_height, raw_buf)
+    
+    if frame["x_end"] == frame["x_start"]:
+        offset_x = 0
+    else:
+        offset_x = frame["x_center"] + frame["x_start"]
+    
+    actual_content_height = frame["y_end"] - frame["y_start"]
+    offset_y = canvas_height - actual_content_height
+    
+    if total_count > 30 and (32 <= frame["num"] <= 36):
+        offset_y -= 1
+    
+    if offset_x < 0 or offset_x >= canvas_w: offset_x = 0
+    if offset_y < 0 or offset_y >= canvas_height: offset_y = 0
+    
+    engine_grid = [[transparent for _ in range(canvas_w)] for _ in range(canvas_height)]
+    
+    for y in range(canvas_height):
+        dst_y = y + offset_y
+        if 0 <= dst_y < canvas_height:
+            for x in range(canvas_w):
+                dst_x = x + offset_x
+                if 0 <= dst_x < canvas_w:
+                    engine_grid[dst_y][dst_x] = raw_buf[y][x]
+    
+    write_png(f"{base_path}_engine.png", canvas_w, canvas_height, engine_grid)
+    
+    divider_w = 4
+    total_comp_w = (canvas_w * 2) + divider_w
+    comp_grid = [[transparent for _ in range(total_comp_w)] for _ in range(canvas_height)]
+    divider_color = [0xFF, 0x00, 0x00, 0xFF]
+    
+    for y in range(canvas_height):
+        for x in range(canvas_w):
+            comp_grid[y][x] = raw_buf[y][x]
+        for d in range(divider_w):
+            comp_grid[y][canvas_w + d] = divider_color
+        for x in range(canvas_w):
+            comp_grid[y][canvas_w + divider_w + x] = engine_grid[y][x]
+    
+    write_png(f"{base_path}_comparison.png", total_comp_w, canvas_height, comp_grid)
 
 def main():
     filename, palette = get_arguments()
-    extract_shapes(filename, palette)
-
+    output_dir = os.path.join(os.path.dirname(filename), os.path.splitext(os.path.basename(filename))[0].lower())
+    os.makedirs(output_dir, exist_ok=True)
+    
+    transparent = [0, 0, 0, 0x00]
+    frames, total_count = parse_shp(filename, palette)
+    
+    for frame in frames:
+        raw_buf = decompress_rle(frame, transparent)
+        pipeline_render(frame, raw_buf, output_dir, total_count, transparent)
+    
+    print(f"Pipeline executed successfully for {filename}")
 
 if __name__ == "__main__":
     main()
+
