@@ -172,18 +172,13 @@ def pipeline_render(frame, raw_buf, output_dir, total_count, transparent):
     canvas_w = frame["width"]
     canvas_height = frame["height"]
     
-    write_png(f"{base_path}_raw.png", canvas_w, canvas_height, raw_buf)
-    
     if frame["x_end"] == frame["x_start"]:
         offset_x = 0
     else:
         offset_x = frame["x_center"] + frame["x_start"]
     
-    actual_content_height = frame["y_end"] - frame["y_start"]
+    actual_content_height = frame["y_end"] - frame["y_start"] + 1
     offset_y = canvas_height - actual_content_height
-    
-    if total_count > 30 and (32 <= frame["num"] <= 36):
-        offset_y -= 1
     
     if offset_x < 0 or offset_x >= canvas_w: offset_x = 0
     if offset_y < 0 or offset_y >= canvas_height: offset_y = 0
@@ -198,22 +193,8 @@ def pipeline_render(frame, raw_buf, output_dir, total_count, transparent):
                 if 0 <= dst_x < canvas_w:
                     engine_grid[dst_y][dst_x] = raw_buf[y][x]
     
-    write_png(f"{base_path}_engine.png", canvas_w, canvas_height, engine_grid)
-    
-    divider_w = 4
-    total_comp_w = (canvas_w * 2) + divider_w
-    comp_grid = [[transparent for _ in range(total_comp_w)] for _ in range(canvas_height)]
-    divider_color = [0xFF, 0x00, 0x00, 0xFF]
-    
-    for y in range(canvas_height):
-        for x in range(canvas_w):
-            comp_grid[y][x] = raw_buf[y][x]
-        for d in range(divider_w):
-            comp_grid[y][canvas_w + d] = divider_color
-        for x in range(canvas_w):
-            comp_grid[y][canvas_w + divider_w + x] = engine_grid[y][x]
-    
-    write_png(f"{base_path}_comparison.png", total_comp_w, canvas_height, comp_grid)
+    #write_png(f"{base_path}_raw.png", canvas_w, canvas_height, raw_buf)
+    write_png(f"{base_path}.png", canvas_w, canvas_height, engine_grid)
 
 def main():
     filename, palette = get_arguments()
